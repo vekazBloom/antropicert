@@ -1,21 +1,11 @@
 import { NextResponse } from 'next/server';
-import { db, type AttemptRow } from '@/lib/db';
-import { createAttempt, runPayload } from '@/lib/attempts';
+import { createAttempt, listAttempts, runPayload } from '@/lib/attempts';
 import { currentUser } from '@/lib/session';
 
 export async function GET() {
   const user = await currentUser();
   if (!user) return NextResponse.json({ error: 'no profile selected' }, { status: 401 });
-  const rows = db
-    .prepare(
-      `SELECT id, mode, module_id, scope, time_limit_sec, started_at, finished_at,
-              total, correct_count, score_pct, passed
-         FROM attempts
-        WHERE user_id = ?
-        ORDER BY id DESC`
-    )
-    .all(user.id) as AttemptRow[];
-  return NextResponse.json({ attempts: rows });
+  return NextResponse.json({ attempts: await listAttempts(user.id) });
 }
 
 export async function POST(req: Request) {
@@ -23,7 +13,7 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: 'no profile selected' }, { status: 401 });
   try {
     const body = await req.json();
-    const attempt = createAttempt({
+    const attempt = await createAttempt({
       userId: user.id,
       mode: body.mode === 'exam' ? 'exam' : 'practice',
       moduleId: body.moduleId ? Number(body.moduleId) : undefined,
@@ -32,7 +22,7 @@ export async function POST(req: Request) {
       shuffleOptions: body.shuffleOptions !== false,
       timeLimitSec: body.timeLimitSec ? Number(body.timeLimitSec) : null,
     });
-    return NextResponse.json(runPayload(attempt));
+    return NextResponse.json(await runPayload(attempt));
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });
   }

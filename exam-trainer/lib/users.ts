@@ -1,25 +1,26 @@
-import { db, type UserRow } from '@/lib/db';
+import { sql, toUser, type UserRow } from '@/lib/db';
 
-export function listUsers(): UserRow[] {
-  return db.prepare('SELECT * FROM users ORDER BY name COLLATE NOCASE').all() as UserRow[];
+export async function listUsers(): Promise<UserRow[]> {
+  const rows = await sql`SELECT * FROM users ORDER BY lower(name)`;
+  return rows.map(toUser);
 }
 
-export function getUser(id: number): UserRow | undefined {
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+export async function getUser(id: number): Promise<UserRow | undefined> {
+  if (!Number.isFinite(id)) return undefined;
+  const rows = await sql`SELECT * FROM users WHERE id = ${id}`;
+  return rows.length ? toUser(rows[0]) : undefined;
 }
 
-export function createUser(name: string): UserRow {
+export async function createUser(name: string): Promise<UserRow> {
   const clean = name.trim();
   if (!clean) throw new Error('name is required');
   if (clean.length > 40) throw new Error('name is too long');
-  const existing = db
-    .prepare('SELECT * FROM users WHERE name = ? COLLATE NOCASE')
-    .get(clean) as UserRow | undefined;
-  if (existing) return existing;
-  const info = db
-    .prepare('INSERT INTO users (name, created_at) VALUES (?, ?)')
-    .run(clean, new Date().toISOString());
-  return getUser(Number(info.lastInsertRowid))!;
+
+  const existing = await sql`SELECT * FROM users WHERE lower(name) = lower(${clean})`;
+  if (existing.length) return toUser(existing[0]);
+
+  const rows = await sql`INSERT INTO users (name) VALUES (${clean}) RETURNING *`;
+  return toUser(rows[0]);
 }
 
 export type ModuleProgress = {
@@ -30,25 +31,43 @@ export type ModuleProgress = {
 };
 
 /** Per-module coverage for a user, counting each question once at its best result. */
-export function moduleProgress(userId: number): Map<number, ModuleProgress> {
-  const rows = db
-    .prepare(
-      `SELECT a.question_id AS qid, MAX(a.is_correct) AS ever_right
-         FROM answers a
-         JOIN attempts t ON t.id = a.attempt_id
-        WHERE t.user_id = ?
-        GROUP BY a.question_id`
-    )
-    .all(userId) as { qid: string; ever_right: number }[];
+export async function moduleProgress(userId: number): Promise<Map<number, ModuleProgress>> {
+  const rows = (await sql`
+    SELECT a.question_id AS qid, bool_or(a.is_correct) AS ever_right
+      FROM answers a
+      JOIN attempts t ON t.id = a.attempt_id
+     WHERE t.user_id = ${userId}
+     GROUP BY a.question_id
+  `) as unknown as { qid: string; ever_right: boolean }[];
 
   const out = new Map<number, ModuleProgress>();
   for (const r of rows) {
     const moduleId = Number(r.qid.slice(1, r.qid.indexOf('-')));
     const e = out.get(moduleId) ?? { moduleId, answered: 0, correct: 0, wrong: 0 };
     e.answered += 1;
-    if (r.ever_right === 1) e.correct += 1;
+    if (r.ever_right) e.correct += 1;
     else e.wrong += 1;
     out.set(moduleId, e);
   }
   return out;
+}
+
+/** Question ids in one module the user has already seen, and which they got wrong. */
+export async function moduleHistory(userId: number, moduleId: number) {
+  const rows = (await sql`
+    SELECT a.question_id AS qid, bool_or(a.is_correct) AS ever_right
+      FROM answers a
+      JOIN attempts t ON t.id = a.attempt_id
+     WHERE t.user_id = ${userId}
+       AND a.question_id LIKE ${'m' + moduleId + '-%'}
+     GROUP BY a.question_id
+  `) as unknown as { qid: string; ever_right: boolean }[];
+
+  const seen = new Set<string>();
+  const wrong = new Set<string>();
+  for (const r of rows) {
+    seen.add(r.qid);
+    if (!r.ever_right) wrong.add(r.qid);
+  }
+  return { seen, wrong };
 }

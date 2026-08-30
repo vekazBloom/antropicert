@@ -1,10 +1,7 @@
-import { db, type AttemptRow, type AnswerRow } from '@/lib/db';
-import {
-  EXAM_PASS_PCT,
-  EXAM_QUESTION_COUNT,
-  MODULE_BY_ID,
-} from '@/data/modules';
+import { sql, toAnswer, toAttempt, type AttemptRow, type AnswerRow } from '@/lib/db';
+import { EXAM_PASS_PCT, EXAM_QUESTION_COUNT, MODULE_BY_ID } from '@/data/modules';
 import { buildExam } from '@/lib/examBuilder';
+import { moduleHistory } from '@/lib/users';
 import {
   LETTERS,
   QUESTIONS_BY_MODULE,
@@ -28,8 +25,6 @@ export type CreateInput = {
   timeLimitSec?: number | null;
 };
 
-const now = () => new Date().toISOString();
-
 function shuffled<T>(items: T[]): T[] {
   const a = [...items];
   for (let i = a.length - 1; i > 0; i--) {
@@ -39,29 +34,7 @@ function shuffled<T>(items: T[]): T[] {
   return a;
 }
 
-/** Question ids in a module the user has already answered / already got wrong. */
-function historyFor(userId: number, moduleId: number) {
-  const rows = db
-    .prepare(
-      `SELECT a.question_id AS qid, MIN(a.is_correct) AS ever_wrong, MAX(a.is_correct) AS ever_right
-         FROM answers a
-         JOIN attempts t ON t.id = a.attempt_id
-        WHERE t.user_id = ?
-        GROUP BY a.question_id`
-    )
-    .all(userId) as { qid: string; ever_wrong: number; ever_right: number }[];
-
-  const seen = new Set<string>();
-  const wrong = new Set<string>();
-  for (const r of rows) {
-    if (!r.qid.startsWith(`m${moduleId}-`)) continue;
-    seen.add(r.qid);
-    if (r.ever_wrong === 0) wrong.add(r.qid);
-  }
-  return { seen, wrong };
-}
-
-export function createAttempt(input: CreateInput): AttemptRow {
+export async function createAttempt(input: CreateInput): Promise<AttemptRow> {
   let questions: Question[];
   let timeLimit = input.timeLimitSec ?? null;
 
@@ -72,7 +45,7 @@ export function createAttempt(input: CreateInput): AttemptRow {
     if (!moduleId || !MODULE_BY_ID.has(moduleId)) throw new Error('unknown module');
     const bank = QUESTIONS_BY_MODULE.get(moduleId)!;
     const scope = input.scope ?? 'all';
-    const { seen, wrong } = historyFor(input.userId, moduleId);
+    const { seen, wrong } = await moduleHistory(input.userId, moduleId);
 
     if (scope === 'unseen') questions = bank.filter((q) => !seen.has(q.id));
     else if (scope === 'wrong') questions = bank.filter((q) => wrong.has(q.id));
@@ -89,37 +62,60 @@ export function createAttempt(input: CreateInput): AttemptRow {
     o: (useOptionShuffle ? shuffleOptions(q) : LETTERS).join(''),
   }));
 
-  const info = db
-    .prepare(
-      `INSERT INTO attempts (user_id, mode, module_id, scope, plan, time_limit_sec, started_at, total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  const rows = await sql`
+    INSERT INTO attempts (user_id, mode, module_id, scope, plan, time_limit_sec, total)
+    VALUES (
+      ${input.userId},
+      ${input.mode},
+      ${input.mode === 'practice' ? input.moduleId! : null},
+      ${input.mode === 'practice' ? (input.scope ?? 'all') : null},
+      ${sql.json(plan)},
+      ${timeLimit},
+      ${plan.length}
     )
-    .run(
-      input.userId,
-      input.mode,
-      input.mode === 'practice' ? input.moduleId! : null,
-      input.mode === 'practice' ? (input.scope ?? 'all') : null,
-      JSON.stringify(plan),
-      timeLimit,
-      now(),
-      plan.length
-    );
-
-  return getAttempt(Number(info.lastInsertRowid))!;
+    RETURNING *
+  `;
+  return toAttempt(rows[0]);
 }
 
-export function getAttempt(id: number): AttemptRow | undefined {
-  return db.prepare('SELECT * FROM attempts WHERE id = ?').get(id) as AttemptRow | undefined;
+export async function getAttempt(id: number): Promise<AttemptRow | undefined> {
+  if (!Number.isFinite(id)) return undefined;
+  const rows = await sql`SELECT * FROM attempts WHERE id = ${id}`;
+  return rows.length ? toAttempt(rows[0]) : undefined;
+}
+
+export async function listAttempts(userId: number, limit?: number): Promise<AttemptRow[]> {
+  const rows = limit
+    ? await sql`SELECT * FROM attempts WHERE user_id = ${userId} ORDER BY id DESC LIMIT ${limit}`
+    : await sql`SELECT * FROM attempts WHERE user_id = ${userId} ORDER BY id DESC`;
+  return rows.map(toAttempt);
+}
+
+export async function listFinishedAttempts(userId: number, limit: number): Promise<AttemptRow[]> {
+  const rows = await sql`
+    SELECT * FROM attempts
+     WHERE user_id = ${userId} AND finished_at IS NOT NULL
+     ORDER BY id DESC
+     LIMIT ${limit}
+  `;
+  return rows.map(toAttempt);
+}
+
+export async function bestExamScore(userId: number): Promise<number | null> {
+  const rows = await sql`
+    SELECT MAX(score_pct) AS best FROM attempts
+     WHERE user_id = ${userId} AND mode = 'exam' AND finished_at IS NOT NULL
+  `;
+  return (rows[0]?.best as number | null) ?? null;
 }
 
 export function planOf(attempt: AttemptRow): PlanItem[] {
-  return JSON.parse(attempt.plan) as PlanItem[];
+  return attempt.plan;
 }
 
-export function answersOf(attemptId: number): AnswerRow[] {
-  return db
-    .prepare('SELECT * FROM answers WHERE attempt_id = ? ORDER BY id')
-    .all(attemptId) as AnswerRow[];
+export async function answersOf(attemptId: number): Promise<AnswerRow[]> {
+  const rows = await sql`SELECT * FROM answers WHERE attempt_id = ${attemptId} ORDER BY id`;
+  return rows.map(toAnswer);
 }
 
 /** Unix ms at which a timed attempt expires, or null when untimed. */
@@ -155,7 +151,7 @@ export type RunPayload = {
   revealed: Record<string, { isCorrect: boolean; correctDisplay: Letter; explanation: string }>;
 };
 
-export function runPayload(attempt: AttemptRow): RunPayload {
+export async function runPayload(attempt: AttemptRow): Promise<RunPayload> {
   const plan = planOf(attempt);
   const questions = plan.map((p) => present(p.q, p.o.split('') as Letter[]));
   const orderById = new Map(plan.map((p) => [p.q, p.o.split('') as Letter[]]));
@@ -163,14 +159,14 @@ export function runPayload(attempt: AttemptRow): RunPayload {
   const given: Record<string, Letter> = {};
   const revealed: RunPayload['revealed'] = {};
 
-  for (const a of answersOf(attempt.id)) {
+  for (const a of await answersOf(attempt.id)) {
     const order = orderById.get(a.question_id);
     if (!order) continue;
     given[a.question_id] = LETTERS[order.indexOf(a.selected as Letter)];
     if (attempt.mode === 'practice') {
       const q = getQuestion(a.question_id);
       revealed[a.question_id] = {
-        isCorrect: a.is_correct === 1,
+        isCorrect: a.is_correct,
         correctDisplay: LETTERS[order.indexOf(q.correct)],
         explanation: q.explanation,
       };
@@ -200,11 +196,11 @@ export type AnswerResult = {
   feedback?: { isCorrect: boolean; correctDisplay: Letter; explanation: string };
 };
 
-export function recordAnswer(
+export async function recordAnswer(
   attempt: AttemptRow,
   questionId: string,
   displayLetter: Letter
-): AnswerResult {
+): Promise<AnswerResult> {
   if (attempt.finished_at) throw new Error('attempt already finished');
   if (isExpired(attempt)) throw new Error('time is up');
 
@@ -219,14 +215,14 @@ export function recordAnswer(
   const q = getQuestion(questionId);
   const isCorrect = sourceLetter === q.correct;
 
-  db.prepare(
-    `INSERT INTO answers (attempt_id, question_id, selected, is_correct, answered_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(attempt_id, question_id)
-     DO UPDATE SET selected = excluded.selected,
-                   is_correct = excluded.is_correct,
-                   answered_at = excluded.answered_at`
-  ).run(attempt.id, questionId, sourceLetter, isCorrect ? 1 : 0, now());
+  await sql`
+    INSERT INTO answers (attempt_id, question_id, selected, is_correct)
+    VALUES (${attempt.id}, ${questionId}, ${sourceLetter}, ${isCorrect})
+    ON CONFLICT (attempt_id, question_id)
+    DO UPDATE SET selected    = EXCLUDED.selected,
+                  is_correct  = EXCLUDED.is_correct,
+                  answered_at = now()
+  `;
 
   if (attempt.mode === 'exam') return { ok: true };
   return {
@@ -270,32 +266,34 @@ export function scoredTotal(attempt: AttemptRow, answeredCount: number): number 
   return attempt.mode === 'exam' ? planOf(attempt).length : answeredCount;
 }
 
-export function finishAttempt(attempt: AttemptRow): AttemptRow {
+export async function finishAttempt(attempt: AttemptRow): Promise<AttemptRow> {
   if (attempt.finished_at) return attempt;
-  const answers = new Map(answersOf(attempt.id).map((a) => [a.question_id, a]));
+  const answers = new Map((await answersOf(attempt.id)).map((a) => [a.question_id, a]));
   const plan = planOf(attempt);
   const answeredCount = plan.filter((p) => answers.has(p.q)).length;
-  const correctCount = plan.filter((p) => answers.get(p.q)?.is_correct === 1).length;
+  const correctCount = plan.filter((p) => answers.get(p.q)?.is_correct === true).length;
   const total = scoredTotal(attempt, answeredCount);
   const scorePct = total > 0 ? (correctCount / total) * 100 : 0;
-  const passed = attempt.mode === 'exam' ? (scorePct >= EXAM_PASS_PCT ? 1 : 0) : null;
+  const passed = attempt.mode === 'exam' ? scorePct >= EXAM_PASS_PCT : null;
 
-  db.prepare(
-    `UPDATE attempts
-        SET finished_at = ?, total = ?, correct_count = ?, score_pct = ?, passed = ?
-      WHERE id = ?`
-  ).run(now(), total, correctCount, scorePct, passed, attempt.id);
-
-  return getAttempt(attempt.id)!;
+  const rows = await sql`
+    UPDATE attempts
+       SET finished_at   = now(),
+           total         = ${total},
+           correct_count = ${correctCount},
+           score_pct     = ${scorePct},
+           passed        = ${passed}
+     WHERE id = ${attempt.id}
+    RETURNING *
+  `;
+  return toAttempt(rows[0]);
 }
 
-export function buildReview(attempt: AttemptRow): Review {
-  const answers = new Map(answersOf(attempt.id).map((a) => [a.question_id, a]));
+export async function buildReview(attempt: AttemptRow): Promise<Review> {
+  const answers = new Map((await answersOf(attempt.id)).map((a) => [a.question_id, a]));
   // A practice run only reviews what was actually answered; an exam reviews the
   // whole paper, including anything left blank.
-  const plan = planOf(attempt).filter(
-    (p) => attempt.mode === 'exam' || answers.has(p.q)
-  );
+  const plan = planOf(attempt).filter((p) => attempt.mode === 'exam' || answers.has(p.q));
 
   const items: ReviewItem[] = plan.map((p, i) => {
     const order = p.o.split('') as Letter[];
@@ -307,7 +305,7 @@ export function buildReview(attempt: AttemptRow): Review {
       moduleTitle: MODULE_BY_ID.get(q.moduleId)?.title ?? `Module ${q.moduleId}`,
       selectedDisplay: a ? LETTERS[order.indexOf(a.selected as Letter)] : null,
       correctDisplay: LETTERS[order.indexOf(q.correct)],
-      isCorrect: a?.is_correct === 1,
+      isCorrect: a?.is_correct === true,
       explanation: q.explanation,
     };
   });
@@ -328,8 +326,11 @@ export function buildReview(attempt: AttemptRow): Review {
     attempt,
     correctCount,
     scorePct: plan.length > 0 ? (correctCount / plan.length) * 100 : 0,
-    passed: attempt.passed === null ? null : attempt.passed === 1,
-    durationSec: Math.max(0, Math.round((end.getTime() - new Date(attempt.started_at).getTime()) / 1000)),
+    passed: attempt.passed,
+    durationSec: Math.max(
+      0,
+      Math.round((end.getTime() - new Date(attempt.started_at).getTime()) / 1000)
+    ),
     perModule: [...perModuleMap.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([moduleId, v]) => ({

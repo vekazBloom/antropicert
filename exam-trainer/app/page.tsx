@@ -13,5 +13,5 @@ export default async function Home({
   const { switch: forceSwitch } = await searchParams;
   const user = await currentUser();
   if (user && !forceSwitch) redirect('/dashboard');
-  return <ProfilePicker users={listUsers()} />;
+  return <ProfilePicker users={await listUsers()} />;
 }

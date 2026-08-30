@@ -1,60 +1,33 @@
-import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import postgres from 'postgres';
 
-const DATA_DIR = join(process.cwd(), 'data');
-mkdirSync(DATA_DIR, { recursive: true });
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error(
+    'DATABASE_URL is not set. Copy .env.example to .env.local and paste your ' +
+      'Supabase connection string (Project Settings -> Database -> Connection ' +
+      'string -> Transaction pooler).'
+  );
+}
 
 declare global {
-  var __examDb: Database.Database | undefined;
+  var __examSql: ReturnType<typeof postgres> | undefined;
 }
 
-function open(): Database.Database {
-  const db = new Database(join(DATA_DIR, 'app.db'));
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      name       TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS attempts (
-      id             INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      mode           TEXT NOT NULL,          -- 'practice' | 'exam'
-      module_id      INTEGER,                -- practice only
-      scope          TEXT,                   -- practice only: 'all' | 'unseen' | 'wrong'
-      plan           TEXT NOT NULL,          -- JSON [{ q: questionId, o: "CADB" }]
-      time_limit_sec INTEGER,                -- NULL = untimed
-      started_at     TEXT NOT NULL,
-      finished_at    TEXT,
-      total          INTEGER NOT NULL,
-      correct_count  INTEGER,
-      score_pct      REAL,
-      passed         INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS answers (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      attempt_id  INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-      question_id TEXT NOT NULL,
-      selected    TEXT NOT NULL,             -- source letter A-D
-      is_correct  INTEGER NOT NULL,
-      answered_at TEXT NOT NULL,
-      UNIQUE(attempt_id, question_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_answers_attempt ON answers(attempt_id);
-    CREATE INDEX IF NOT EXISTS idx_attempts_user   ON attempts(user_id, mode);
-  `);
-  return db;
+function connect() {
+  return postgres(connectionString!, {
+    // Supabase's transaction pooler does not support prepared statements, and
+    // serverless functions should not hold a pool open.
+    prepare: false,
+    max: 1,
+    idle_timeout: 20,
+    connect_timeout: 15,
+  });
 }
 
-// Next.js dev reloads modules; reuse one handle so WAL locks stay sane.
-export const db = globalThis.__examDb ?? open();
-if (process.env.NODE_ENV !== 'production') globalThis.__examDb = db;
+// Next.js reloads modules in dev; reuse one client so connections don't pile up.
+export const sql = globalThis.__examSql ?? connect();
+if (process.env.NODE_ENV !== 'production') globalThis.__examSql = sql;
 
 export type UserRow = { id: number; name: string; created_at: string };
 
@@ -64,14 +37,14 @@ export type AttemptRow = {
   mode: 'practice' | 'exam';
   module_id: number | null;
   scope: string | null;
-  plan: string;
+  plan: { q: string; o: string }[];
   time_limit_sec: number | null;
   started_at: string;
   finished_at: string | null;
   total: number;
   correct_count: number | null;
   score_pct: number | null;
-  passed: number | null;
+  passed: boolean | null;
 };
 
 export type AnswerRow = {
@@ -79,6 +52,51 @@ export type AnswerRow = {
   attempt_id: number;
   question_id: string;
   selected: string;
-  is_correct: number;
+  is_correct: boolean;
   answered_at: string;
 };
+
+/**
+ * Postgres hands back `Date` objects for timestamptz. Everything downstream —
+ * the client payloads, the date formatting — expects ISO strings, so timestamps
+ * are normalised here at the boundary rather than in a dozen call sites.
+ */
+function iso(value: Date | string | null): string | null {
+  if (value === null) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export function toUser(row: any): UserRow {
+  return { id: row.id, name: row.name, created_at: iso(row.created_at)! };
+}
+
+export function toAttempt(row: any): AttemptRow {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    mode: row.mode,
+    module_id: row.module_id,
+    scope: row.scope,
+    plan: row.plan,
+    time_limit_sec: row.time_limit_sec,
+    started_at: iso(row.started_at)!,
+    finished_at: iso(row.finished_at),
+    total: row.total,
+    correct_count: row.correct_count,
+    score_pct: row.score_pct,
+    passed: row.passed,
+  };
+}
+
+export function toAnswer(row: any): AnswerRow {
+  return {
+    id: row.id,
+    attempt_id: row.attempt_id,
+    question_id: row.question_id,
+    selected: row.selected,
+    is_correct: row.is_correct,
+    answered_at: iso(row.answered_at)!,
+  };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */

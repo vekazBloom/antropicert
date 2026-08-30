@@ -4,7 +4,7 @@ import { PracticeStart } from '@/components/PracticeStart';
 import { MODULE_BY_ID } from '@/data/modules';
 import { QUESTIONS_BY_MODULE } from '@/lib/questions';
 import { currentUser } from '@/lib/session';
-import { db } from '@/lib/db';
+import { moduleHistory } from '@/lib/users';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,21 +22,7 @@ export default async function PracticePage({
   if (!user) redirect('/');
 
   const bank = QUESTIONS_BY_MODULE.get(id)!;
-  const rows = db
-    .prepare(
-      `SELECT a.question_id AS qid, MAX(a.is_correct) AS ever_right
-         FROM answers a JOIN attempts t ON t.id = a.attempt_id
-        WHERE t.user_id = ? GROUP BY a.question_id`
-    )
-    .all(user.id) as { qid: string; ever_right: number }[];
-
-  const seen = new Set<string>();
-  const wrong = new Set<string>();
-  for (const r of rows) {
-    if (!r.qid.startsWith(`m${id}-`)) continue;
-    seen.add(r.qid);
-    if (r.ever_right === 0) wrong.add(r.qid);
-  }
+  const { seen, wrong } = await moduleHistory(user.id, id);
 
   return (
     <>

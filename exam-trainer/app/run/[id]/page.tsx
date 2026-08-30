@@ -13,11 +13,11 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
   const user = await currentUser();
   if (!user) redirect('/');
 
-  const attempt = getAttempt(Number(id));
+  const attempt = await getAttempt(Number(id));
   if (!attempt || attempt.user_id !== user.id) notFound();
   if (attempt.finished_at) redirect(`/results/${attempt.id}`);
 
-  const payload = runPayload(attempt);
+  const payload = await runPayload(attempt);
   const mod = attempt.module_id ? MODULE_BY_ID.get(attempt.module_id) : null;
 
   return (

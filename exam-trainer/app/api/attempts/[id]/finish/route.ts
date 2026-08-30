@@ -5,10 +5,10 @@ import { currentUser } from '@/lib/session';
 export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const user = await currentUser();
-  const attempt = getAttempt(Number(id));
+  const attempt = await getAttempt(Number(id));
   if (!attempt || !user || attempt.user_id !== user.id) {
     return NextResponse.json({ error: 'not found' }, { status: 404 });
   }
-  const finished = finishAttempt(attempt);
-  return NextResponse.json({ review: buildReview(finished) });
+  const finished = await finishAttempt(attempt);
+  return NextResponse.json({ review: await buildReview(finished) });
 }

@@ -12,13 +12,36 @@ A local study app for the **Claude Certified Associate – Foundations** exam, b
 
 ## Running it
 
-Needs Node 20+ (`nvm use 20`).
+Needs Node 20+ (`nvm use 20`) and a Postgres database (Supabase).
+
+1. Create a Supabase project.
+2. Copy the connection string: **Project Settings → Database → Connection string →
+   Transaction pooler** (port 6543).
+3. Set it up locally:
 
 ```bash
-cd exam-trainer && npm install && npm run dev
+cd exam-trainer && npm install && cp .env.example .env.local
+```
+
+Paste the connection string into `.env.local`, then create the tables and start:
+
+```bash
+npm run db:init && npm run dev
 ```
 
 Then open http://localhost:3000.
+
+## Deploying to Vercel
+
+Two settings matter:
+
+- **Root Directory** must be `exam-trainer` — the app is not at the repo root, and
+  leaving this unset is what produces a `404: NOT_FOUND` on every page.
+- **Environment variable** `DATABASE_URL` — the same Supabase transaction-pooler
+  string. Add it for Production, Preview and Development.
+
+Run `npm run db:init` once locally against the same database (or paste
+`db/schema.sql` into the Supabase SQL editor) so the tables exist.
 
 ## Re-extracting the questions
 
@@ -42,11 +65,18 @@ a correct letter, and an explanation.
 | `exam-trainer/lib/questions.ts` | Loads the bank, shuffles answer order per attempt |
 | `exam-trainer/lib/examBuilder.ts` | Picks the 53, stratified across modules |
 | `exam-trainer/lib/attempts.ts` | Creates attempts, records answers, grades — all server-side |
-| `exam-trainer/lib/db.ts` | SQLite schema (`data/app.db`, gitignored) |
+| `exam-trainer/lib/db.ts` | Postgres client and row types |
+| `exam-trainer/db/schema.sql` | Tables for profiles, attempts and answers |
 | `exam-trainer/app/` | Pages and API routes |
 
 Grading runs on the server on purpose: during an exam the correct answers and explanations
 are never sent to the browser, so they cannot be read out of the page source.
+
+Only profiles, attempts and answers live in Postgres. The 757 questions stay in
+`data/questions.json`, so the answer key is never reachable through the database.
+
+Note there are no passwords — anyone with the URL can create a profile and see the
+other profiles listed. That is fine for personal study on a link you don't share.
 
 Answer order is shuffled per attempt. In modules 1, 2 and 8 the source answer keys are
 heavily weighted towards option B (72–87% of answers), so without shuffling you would learn

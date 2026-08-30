@@ -7,7 +7,7 @@ import { EXAM_PASS_CORRECT, EXAM_PASS_PCT, EXAM_QUESTION_COUNT, MODULES } from '
 import { QUESTIONS_BY_MODULE } from '@/lib/questions';
 import { currentUser } from '@/lib/session';
 import { moduleProgress } from '@/lib/users';
-import { db, type AttemptRow } from '@/lib/db';
+import { bestExamScore, listFinishedAttempts } from '@/lib/attempts';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,18 +15,11 @@ export default async function Dashboard() {
   const user = await currentUser();
   if (!user) redirect('/');
 
-  const progress = moduleProgress(user.id);
-  const recent = db
-    .prepare(
-      `SELECT * FROM attempts WHERE user_id = ? AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 5`
-    )
-    .all(user.id) as AttemptRow[];
-
-  const bestExam = db
-    .prepare(
-      `SELECT MAX(score_pct) AS best FROM attempts WHERE user_id = ? AND mode = 'exam' AND finished_at IS NOT NULL`
-    )
-    .get(user.id) as { best: number | null };
+  const [progress, recent, bestExam] = await Promise.all([
+    moduleProgress(user.id),
+    listFinishedAttempts(user.id, 5),
+    bestExamScore(user.id),
+  ]);
 
   return (
     <>
@@ -47,10 +40,10 @@ export default async function Dashboard() {
                 </strong>{' '}
                 correct.
               </p>
-              {bestExam.best !== null && (
+              {bestExam !== null && (
                 <p className="mt-3 text-sm text-muted">
                   Your best exam score so far:{' '}
-                  <strong className="text-foreground">{formatPct(bestExam.best)}%</strong>
+                  <strong className="text-foreground">{formatPct(bestExam)}%</strong>
                 </p>
               )}
             </div>
@@ -128,7 +121,7 @@ export default async function Dashboard() {
                       {a.correct_count}/{a.total}
                     </span>
                     {a.mode === 'exam' &&
-                      (a.passed === 1 ? (
+                      (a.passed ? (
                         <Pill tone="good">
                           <CheckCircle2 size={12} /> Pass
                         </Pill>

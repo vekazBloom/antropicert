@@ -4,7 +4,7 @@ import { CheckCircle2, Inbox, XCircle } from 'lucide-react';
 import { AppHeader } from '@/components/AppHeader';
 import { Pill, formatDate, formatDuration, formatPct } from '@/components/ui';
 import { MODULE_BY_ID } from '@/data/modules';
-import { db, type AttemptRow } from '@/lib/db';
+import { listAttempts } from '@/lib/attempts';
 import { currentUser } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -13,9 +13,7 @@ export default async function HistoryPage() {
   const user = await currentUser();
   if (!user) redirect('/');
 
-  const attempts = db
-    .prepare('SELECT * FROM attempts WHERE user_id = ? ORDER BY id DESC')
-    .all(user.id) as AttemptRow[];
+  const attempts = await listAttempts(user.id);
 
   return (
     <>
@@ -73,7 +71,7 @@ export default async function HistoryPage() {
                           </span>
                         </span>
                         {a.mode === 'exam' &&
-                          (a.passed === 1 ? (
+                          (a.passed ? (
                             <Pill tone="good">
                               <CheckCircle2 size={12} /> Pass
                             </Pill>

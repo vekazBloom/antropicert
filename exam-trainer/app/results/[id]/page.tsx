@@ -15,11 +15,11 @@ export default async function ResultsPage({ params }: { params: Promise<{ id: st
   const user = await currentUser();
   if (!user) redirect('/');
 
-  let attempt = getAttempt(Number(id));
+  let attempt = await getAttempt(Number(id));
   if (!attempt || attempt.user_id !== user.id) notFound();
-  if (!attempt.finished_at) attempt = finishAttempt(attempt);
+  if (!attempt.finished_at) attempt = await finishAttempt(attempt);
 
-  const review = buildReview(attempt);
+  const review = await buildReview(attempt);
   const isExam = attempt.mode === 'exam';
   const passed = review.passed === true;
   const mod = attempt.module_id ? MODULE_BY_ID.get(attempt.module_id) : null;
