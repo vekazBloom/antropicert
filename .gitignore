@@ -1,0 +1,18 @@
+node_modules/
+.next/
+out/
+build/
+
+# Local study data — profiles, attempts, answers.
+exam-trainer/data/app.db
+exam-trainer/data/app.db-wal
+exam-trainer/data/app.db-shm
+
+.DS_Store
+*.pem
+.env*
+!.env.example
+next-env.d.ts
+
+# TypeScript incremental build cache
+*.tsbuildinfo
